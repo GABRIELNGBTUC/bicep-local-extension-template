@@ -1,0 +1,21 @@
+{
+    "analyzers": {
+      "core": {
+        "rules": {
+          "no-unused-params": {
+            "level": "warning"
+          }
+        }
+      }
+    },
+  "extensions": {
+    "myextension": "../bin/my-ext"
+  },
+    "experimentalFeaturesEnabled": {
+      "paramsFiles": true,
+      "userDefinedFunctions": true,
+      "compileTimeImports": true,
+      "symbolicNameCodegen": true,
+      "localDeploy": true
+    }
+  }
