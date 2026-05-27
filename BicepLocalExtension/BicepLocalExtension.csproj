@@ -15,4 +15,11 @@
       <PackageReference Include="Azure.Bicep.Local.Extension" Version="0.38.33" />
     </ItemGroup>
 
+    <ItemGroup>
+        <ProjectReference
+          Include="..\BicepLocalExtension.SourceGenerator\BicepLocalExtension.SourceGenerator.csproj"
+          OutputItemType="Analyzer"
+          ReferenceOutputAssembly="false" />
+    </ItemGroup>
+
 </Project>

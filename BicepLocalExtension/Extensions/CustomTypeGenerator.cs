@@ -16,6 +16,47 @@ using BicepLocalExtension.Extensions;
 
 namespace BicepLocalExtension.Generator;
 
+
+public class CustomTypeProvider : ITypeProvider
+{
+    private readonly Assembly[] assemblies;
+
+    public CustomTypeProvider(Assembly[]? assemblies = null)
+    {
+        this.assemblies = assemblies ?? GetAssembliesInReferenceScope();
+    }
+
+    private static Assembly[] GetAssembliesInReferenceScope()
+    {
+        var executingAssembly = Assembly.GetExecutingAssembly();
+        return executingAssembly
+            .GetReferencedAssemblies()
+            .Select(Assembly.Load)
+            .Append(executingAssembly)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Provides resource type discovery for Bicep extensions by scanning loaded assemblies for types
+    /// annotated with <see cref="ResourceTypeAttribute"/>.
+    /// </summary>
+    public IEnumerable<(Type type, ResourceTypeAttribute attribute)> GetResourceTypes(bool throwOnDuplicate)
+    {
+        var result = assemblies
+            .SelectMany(assembly => assembly.GetTypes())
+            .Where(x => x.IsVisible)
+            .Select(x => (type: x, attribute: x.GetCustomAttribute<ResourceTypeAttribute>(true)!))
+            .Where(x => x.attribute is not null)
+            .ToImmutableArray();
+
+        foreach (var group in result.GroupBy(x => x.attribute.FullName))
+        {
+            yield return group.First();
+        }
+    }
+}
+
+
 public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
 {
     private readonly HashSet<Type> visited;
@@ -33,18 +74,6 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
     /// <summary>
     /// Provides functionality to generate Bicep resource type definitions from .NET types.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The <see cref="TypeDefinitionBuilder"/> inspects resource types provided by an <see cref="ITypeProvider"/>,
-    /// analyzes their public properties and associated <see cref="TypePropertyAttribute"/> metadata,
-    /// and produces a <see cref="TypeDefinition"/> containing serialized type and index metadata
-    /// suitable for Bicep extension consumption.
-    /// </para>
-    /// <para>
-    /// The builder supports primitive types (string, int, bool), arrays, nullable enums, and nested complex types.
-    /// If a property type cannot be mapped to a supported Bicep type, a <see cref="NotImplementedException"/> is thrown.
-    /// </para>
-    /// </remarks>
     public CustomTypeGenerator(
         string name,
         string version,
@@ -69,18 +98,6 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
         this.typeCache = new ConcurrentDictionary<Type, TypeBase>();
     }
 
-    /// <summary>
-    /// Generates Bicep resource type definitions based on the types provided by the <see cref="ITypeProvider"/>.
-    /// This method inspects the resource types, their properties, and associated attributes to produce
-    /// a <see cref="TypeDefinition"/> containing the serialized type and index metadata for use in Bicep extensions.
-    /// </summary>
-    /// <returns>
-    /// A <see cref="TypeDefinition"/> object containing the JSON representations of the resource types and their index.
-    /// </returns>
-    /// <remarks>
-    /// This method will throw a <see cref="NotImplementedException"/> if a property type is encountered that cannot be mapped
-    /// to a supported Bicep type (e.g., unsupported primitives or collections).
-    /// </remarks>
     public TypeDefinition GenerateTypeDefinition()
     {
         var typesJsonPath = "types.json";
@@ -109,13 +126,14 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
             }.ToImmutableDictionary());
     }
 
-    private ResourceType GenerateResource(TypeFactory typeFactory, ConcurrentDictionary<Type, TypeBase> typeCache, Type type, ResourceTypeAttribute attribute)
-        => typeFactory.Create(() => new ResourceType(
+    private ResourceType GenerateResource(TypeFactory typeFactory, ConcurrentDictionary<Type, TypeBase> typeCache,
+        Type type, ResourceTypeAttribute attribute)
+        => (ResourceType) typeFactory.AddOrGetReference(new ResourceType(
             name: attribute.FullName,
-            body: typeFactory.GetReference(typeFactory.Create(() => GenerateForRecord(typeFactory, typeCache, type))),
+            body: typeFactory.GetReference(typeFactory.AddOrGetReference(GenerateForRecord(typeFactory, typeCache, type)).Type),
             functions: null,
             writableScopes_in: ScopeType.All,
-            readableScopes_in: ScopeType.All));
+            readableScopes_in: ScopeType.All)).Type;
 
     private TypeBase GenerateForRecord(TypeFactory factory, ConcurrentDictionary<Type, TypeBase> typeCache, Type type)
     {
@@ -123,7 +141,8 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
 
         // Handle discriminated types
         if (!visited.Contains(type) && type.GetCustomAttribute<JsonPolymorphicAttribute>() is { } polymorphicAttribute
-                                    && type.GetCustomAttributes<JsonDerivedTypeAttribute>() is { } derivedTypesAttribute)
+                                    && type.GetCustomAttributes<JsonDerivedTypeAttribute>() is
+                                        { } derivedTypesAttribute)
         {
             visited.Add(type);
             var baseProperties = (ObjectType)GenerateForRecord(factory, typeCache, type);
@@ -133,26 +152,35 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
                 string? typeDiscriminator = derivedType.TypeDiscriminator?.ToString();
                 if (typeDiscriminator is null)
                 {
-                    throw new ArgumentNullException(nameof(derivedType.TypeDiscriminator), "The type discriminator property from JsonDerivedTypeAttribute cannot be null.");
+                    throw new ArgumentNullException(nameof(derivedType.TypeDiscriminator),
+                        "The type discriminator property from JsonDerivedTypeAttribute cannot be null.");
                 }
                 else
                 {
-                    var discriminatedTypeProperties = typeCache.GetOrAdd(derivedType.DerivedType, _ => (ObjectType)GenerateForRecord(factory, typeCache, derivedType.DerivedType));
+                    var discriminatedTypeProperties = typeCache.GetOrAdd(derivedType.DerivedType,
+                        _ => (ObjectType)GenerateForRecord(factory, typeCache, derivedType.DerivedType));
                     var concreteDiscriminatedTypeProperties = (ObjectType)discriminatedTypeProperties;
-                    var discriminatorTypeReference = factory.AddOrGetReference(new StringLiteralType(typeDiscriminator));
+                    var discriminatorTypeReference =
+                        factory.AddOrGetReference(new StringLiteralType(typeDiscriminator));
                     var newProperties =
                             new Dictionary<string, ObjectTypeProperty>()
                             {
                                 {
                                     polymorphicAttribute.TypeDiscriminatorPropertyName!,
                                     new ObjectTypeProperty(
-                                        discriminatorTypeReference, ObjectTypePropertyFlags.Required, "The discriminator for derived types.")
+                                        discriminatorTypeReference, ObjectTypePropertyFlags.Required,
+                                        "The discriminator for derived types.")
                                 }
                             }
                         ;
                     foreach (var kvp in concreteDiscriminatedTypeProperties.Properties)
                     {
                         newProperties.TryAdd(kvp.Key, kvp.Value);
+
+                        if (baseProperties.Properties.TryGetValue(kvp.Key, out var baseProperty))
+                        {
+                            newProperties.Remove(kvp.Key);
+                        }
                     }
 
                     var newObjectType = new ObjectType(concreteDiscriminatedTypeProperties.Name,
@@ -175,20 +203,36 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
 
         foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
-            if (visited.Contains(property.PropertyType))
+            var annotation = property.GetCustomAttributes<ExtendedTypePropertyAttribute>(true).FirstOrDefault()
+                             ?? new ExtendedTypePropertyAttribute(null);
+            
+            var propertyType = property.PropertyType;
+            if (propertyType.IsGenericType
+                && propertyType.GetGenericTypeDefinition() == typeof(Nullable<>)
+                && propertyType.GetGenericArguments()[0].IsEnum is false)
             {
+                propertyType = propertyType.GetGenericArguments()[0];
+            }
+
+            // Compare against the containing type (self-reference), not arbitrary property types
+            if (visited.Contains(type) &&
+                propertyType == type &&
+                typeCache.TryGetValue(type, out var containingTypeRef))
+            {
+                typeProperties[CamelCase(property.Name)] = new ObjectTypeProperty(
+                    factory.AddOrGetReference(containingTypeRef),
+                    annotation?.Flags ?? ObjectTypePropertyFlags.None,
+                    annotation?.Description);
                 continue;
             }
 
-            var annotation = property.GetCustomAttributes<ExtendedTypePropertyAttribute>(true).FirstOrDefault()
-                             ?? new ExtendedTypePropertyAttribute(null);
+            
             var isNullable = annotation?.IsNullable ?? false;
             var minimumLengthAttribute = property.GetCustomAttribute<MinLengthAttribute>(false);
             var maximumLengthAttribute = property.GetCustomAttribute<MaxLengthAttribute>(false);
             var patternAttribute = property.GetCustomAttribute<BicepStringPatternAttribute>(false);
             annotation?.MergeStringPropertyAttribute(maximumLengthAttribute, minimumLengthAttribute, patternAttribute);
 
-            var propertyType = property.PropertyType;
             //We will generate nullable generics as non-nullable and convert it into a union type with NullType
             if (propertyType.IsGenericType
                 && propertyType.GetGenericTypeDefinition() == typeof(Nullable<>)
@@ -226,7 +270,8 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
                     if (!valueType.IsPrimitive && valueType != typeof(string))
                     {
                         additionalPropertiesReference =
-                            factory.AddOrGetReference(typeCache.GetOrAdd(valueType, _ => GenerateForRecord(factory, typeCache, valueType)));
+                            factory.AddOrGetReference(typeCache.GetOrAdd(valueType,
+                                _ => GenerateForRecord(factory, typeCache, valueType)));
                     }
                     else
                     {
@@ -254,7 +299,7 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
                     }
 
                     var typeName = $"Dictionary<string, {valueType.Name}>";
-                    typeReference = factory.AddOrGetReference(typeCache.GetOrAdd(type, _ => new ObjectType(typeName,
+                    typeReference = factory.AddOrGetReference(typeCache.GetOrAdd(propertyType, _ => new ObjectType(typeName,
                         new Dictionary<string, ObjectTypeProperty>(),
                         additionalPropertiesReference))).Type;
                 }
@@ -282,36 +327,41 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
 
                     if (!TryResolveTypeReference(elementType, annotation, out var elementTypeReference))
                     {
-                        elementTypeReference = typeCache.GetOrAdd(elementType, _ => factory.Create(() => GenerateForRecord(factory, typeCache, elementType)));
+                        elementTypeReference = typeCache.GetOrAdd(elementType,
+                            _ => factory.AddOrGetReference(GenerateForRecord(factory, typeCache, elementType)).Type);
                     }
 
-                    typeReference = typeCache.GetOrAdd(propertyType, _ => factory.Create(() => new ArrayType(factory.GetReference(elementTypeReference))));
+                    typeReference = typeCache.GetOrAdd(propertyType,
+                        _ => factory.AddOrGetReference(new ArrayType(factory.GetReference(elementTypeReference))).Type);
                 }
                 else if (propertyType.IsClass)
                 {
                     visited.Add(property.PropertyType);
 
-                    typeReference = typeCache.GetOrAdd(propertyType, _ => factory.Create(() => GenerateForRecord(factory, typeCache, propertyType)));
+                    typeReference = typeCache.GetOrAdd(propertyType,
+                        _ => factory.AddOrGetReference(GenerateForRecord(factory, typeCache, propertyType)).Type);
                 }
                 else if (propertyType.IsGenericType &&
                          propertyType.GetGenericTypeDefinition() == typeof(Nullable<>) &&
                          propertyType.GetGenericArguments()[0] is { IsEnum: true } enumType)
                 {
                     var enumMembers = enumType.GetEnumNames()
-                        .Select(x => factory.Create(() => new StringLiteralType(x)))
+                        .Select(x => factory.AddOrGetReference(new StringLiteralType(x)).Type)
                         .Select(x => factory.GetReference(x))
                         .ToImmutableArray();
 
-                    typeReference = typeCache.GetOrAdd(propertyType, _ => factory.Create(() => new UnionType(enumMembers)));
+                    typeReference = typeCache.GetOrAdd(propertyType,
+                        _ => factory.AddOrGetReference(new UnionType(enumMembers)).Type);
                 }
                 else if (propertyType is { IsEnum: true } enumTypeNonNullable)
                 {
                     var enumMembers = enumTypeNonNullable.GetEnumNames()
-                        .Select(x => factory.Create(() => new StringLiteralType(x)))
+                        .Select(x => factory.AddOrGetReference(new StringLiteralType(x)).Type)
                         .Select(x => factory.GetReference(x))
                         .ToImmutableArray();
 
-                    typeReference = typeCache.GetOrAdd(propertyType, _ => factory.Create(() => new UnionType(enumMembers)));
+                    typeReference = typeCache.GetOrAdd(propertyType,
+                        _ => factory.AddOrGetReference(new UnionType(enumMembers)).Type);
                 }
 
                 else
@@ -341,7 +391,8 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
             null);
     }
 
-    private bool TryResolveTypeReference(Type type, ExtendedTypePropertyAttribute? annotation, [NotNullWhen(true)] out TypeBase? typeReference)
+    private bool TryResolveTypeReference(Type type, ExtendedTypePropertyAttribute? annotation,
+        [NotNullWhen(true)] out TypeBase? typeReference)
     {
         typeReference = null;
         if (type == typeof(string))
