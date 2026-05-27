@@ -1,11 +1,11 @@
-﻿{
+{
   "$schema": "http://json.schemastore.org/template",
   "author": "GABRIELNGBTUC",
-  "classifications": [ "Common", "Console", "Bicep" ],
+  "classifications": ["Common", "Bicep", "Solution"],
   "identity": "BicepLocalExtension",
   "name": "Scaffolds a Bicep Local Extension",
   "shortName": "biceplocalextension",
-  "sourceName":"BicepLocalExtension",
+  "sourceName": "BicepLocalExtension",
   "tags": {
     "language": "C#",
     "type": "project"
@@ -15,17 +15,17 @@
       "modifiers": [
         {
           "exclude": [
-            ".vs/**/*",
-            ".idea/**/*",
-            "**.sln",
-            "**bin/",
-            "**obj/",
-            ".git/**/*",
-            ".template.config/**/*",
-            "**/global.json"
+            "**/.git/**",
+            "**/.idea/**",
+            "**/.vs/**",
+            "**/bin/**",
+            "**/obj/**",
+            "**/.template.config/**",
+            "**/*.DotSettings.user"
           ]
         }
       ]
     }
   ]
 }
+
