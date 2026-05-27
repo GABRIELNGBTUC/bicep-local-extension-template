@@ -3,6 +3,7 @@ using Azure.Bicep.Types.Concrete;
 using Microsoft.AspNetCore.Builder;
 using Bicep.Local.Extension.Host.Extensions;
 using Bicep.Local.Extension.Types;
+using BicepLocalExtension;
 using BicepLocalExtension.Generator;
 using BicepLocalExtension.Handlers;
 using BicepLocalExtension.Models;
@@ -17,8 +18,7 @@ builder.Services
         version: "0.0.1",
         isSingleton: true,
         typeAssembly: typeof(Program).Assembly)
-    .WithResourceHandler<MyResourceHandler>();
-
+        .WithAllResourceHandlers();
 // Comment the block below make use of the built-in generator in the Bicep extension nuget package
 // This custom generator has more features than the 0.38 built-in generator but may contain bugs and comparatively generates a larger index file
 // ******************************************
