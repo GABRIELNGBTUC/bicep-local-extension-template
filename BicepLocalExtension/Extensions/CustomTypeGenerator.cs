@@ -146,6 +146,7 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
         {
             visited.Add(type);
             var baseProperties = (ObjectType)GenerateForRecord(factory, typeCache, type);
+            var discriminatorName = polymorphicAttribute.TypeDiscriminatorPropertyName!;
             var childTypesDictionary = new Dictionary<string, ITypeReference>();
             foreach (var derivedType in derivedTypesAttribute)
             {
@@ -162,26 +163,21 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
                     var concreteDiscriminatedTypeProperties = (ObjectType)discriminatedTypeProperties;
                     var discriminatorTypeReference =
                         factory.AddOrGetReference(new StringLiteralType(typeDiscriminator));
-                    var newProperties =
-                            new Dictionary<string, ObjectTypeProperty>()
-                            {
-                                {
-                                    polymorphicAttribute.TypeDiscriminatorPropertyName!,
-                                    new ObjectTypeProperty(
-                                        discriminatorTypeReference, ObjectTypePropertyFlags.Required,
-                                        "The discriminator for derived types.")
-                                }
-                            }
-                        ;
-                    foreach (var kvp in concreteDiscriminatedTypeProperties.Properties)
-                    {
-                        newProperties.TryAdd(kvp.Key, kvp.Value);
+                    var newProperties = concreteDiscriminatedTypeProperties.Properties
+                        .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
 
-                        if (baseProperties.Properties.TryGetValue(kvp.Key, out var baseProperty))
+                    foreach (var basePropertyName in baseProperties.Properties.Keys)
+                    {
+                        if (!string.Equals(basePropertyName, discriminatorName, StringComparison.Ordinal))
                         {
-                            newProperties.Remove(kvp.Key);
+                            newProperties.Remove(basePropertyName);
                         }
                     }
+
+                    newProperties[discriminatorName] = new ObjectTypeProperty(
+                        discriminatorTypeReference,
+                        ObjectTypePropertyFlags.Required,
+                        "The discriminator for derived types.");
 
                     var newObjectType = new ObjectType(concreteDiscriminatedTypeProperties.Name,
                         newProperties
@@ -194,8 +190,9 @@ public sealed class CustomTypeGenerator : ITypeDefinitionBuilder
 
             var typeReference = typeCache.GetOrAdd(type, _ => factory.AddOrGetReference(new DiscriminatedObjectType(
                 type.Name,
-                polymorphicAttribute.TypeDiscriminatorPropertyName!, baseProperties.Properties
-                , childTypesDictionary)).Type);
+                discriminatorName,
+                baseProperties.Properties,
+                childTypesDictionary)).Type);
 
             // We return here since we already explored the base and derived types
             return typeReference;
